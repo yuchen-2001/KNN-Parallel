@@ -3,24 +3,24 @@ import pandas as pd
 import os
 
 # Define dataset sizes
-dataset_configs = [
-    {"name": "small", "NTRAIN": 135, "NTEST": 15},
-    {"name": "medium", "NTRAIN": 1000, "NTEST": 100},
-    {"name": "large", "NTRAIN": 10000, "NTEST": 1000}
-]
-
 # dataset_configs = [
 #     {"name": "small", "NTRAIN": 135, "NTEST": 15},
-#     {"name": "medium", "NTRAIN": 10000, "NTEST": 1000},
-#     {"name": "large", "NTRAIN": 1000000, "NTEST": 10000}
+#     {"name": "medium", "NTRAIN": 1000, "NTEST": 100},
+#     {"name": "large", "NTRAIN": 10000, "NTEST": 1000}
 # ]
+
+dataset_configs = [
+    {"name": "small", "NTRAIN": 135, "NTEST": 15},
+    {"name": "medium", "NTRAIN": 10000, "NTEST": 1000},
+    {"name": "large", "NTRAIN": 1000000, "NTEST": 10000}
+]
 
 # Shared settings
 NFEATURES = 4
 NCLASSES = 3
 
 # Base folder for datasets
-base_dir = "./datasets"
+# base_dir = "./datasets"
 base_dir = "./datasets_cuda"
 os.makedirs(base_dir, exist_ok=True)
 
