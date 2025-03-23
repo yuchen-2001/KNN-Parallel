@@ -151,6 +151,20 @@ int predict(float *labels)
 float *fit(float *X_train, float *y_train, float *X_test)
 {
     float *X_traind, *y_traind, *X_testd, *distanced, *distance;
+
+    // Create timer event
+    cudaEvent_t st1;
+    cudaEvent_t et1;
+    cudaEvent_t st2;
+    cudaEvent_t et2;
+
+    float time1;
+    float time2;
+
+    cudaEventCreate(&st1);
+    cudaEventCreate(&et1);
+    cudaEventCreate(&st2);
+    cudaEventCreate(&et2);
     
     distance = getFloatMat(NTRAIN, 1);
     
@@ -158,7 +172,6 @@ float *fit(float *X_train, float *y_train, float *X_test)
     int y_train_size = sizeof(float)*NTRAIN;
     int X_test_size = sizeof(float)*NFEATURES;
     int distance_size = sizeof(float)*NTRAIN;
-    
     
     cudaMalloc((void**)&X_traind, X_train_size);
     cudaMalloc((void**)&y_traind, y_train_size);
@@ -168,11 +181,19 @@ float *fit(float *X_train, float *y_train, float *X_test)
     cudaMemcpy(X_traind, X_train, X_train_size, cudaMemcpyHostToDevice);
     cudaMemcpy(y_traind, y_train, y_train_size, cudaMemcpyHostToDevice);
     cudaMemcpy(X_testd, X_test, X_test_size, cudaMemcpyHostToDevice);
+
+    // Start record
+    cudaEventRecord(st1);
    
-    //launch distance kernel 
-    calcDistance <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (X_traind, X_testd, distanced); 
+    //TODO: launch distance kernel 
+    calcDistance <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (X_traind, X_testd, distanced);   
     
     cudaDeviceSynchronize();
+
+    // End record
+    cudaEventRecord(et1);
+    cudaEventSynchronize(et1);
+    cudaEventElapsedTime(&time1, st1, et1);
     
     cudaMemcpy(distance, distanced, distance_size, cudaMemcpyDeviceToHost);
     
@@ -190,8 +211,16 @@ float *fit(float *X_train, float *y_train, float *X_test)
     
     cudaMemcpy(distanced, distance, distance_size, cudaMemcpyHostToDevice);
     
-    //call sorting kernel
+    // Start record
+    cudaEventRecord(st2);
+
+    //TODO: call sorting kernel
     sortArray <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (distanced, y_traind, sortedDistanced, sortedytraind);
+
+    // End record
+    cudaEventRecord(et2);
+    cudaEventSynchronize(et2);
+    cudaEventElapsedTime(&time2, st2, et2);
     
     cudaMemcpy(sortedDistance, sortedDistanced, distance_size, cudaMemcpyDeviceToHost);
     cudaMemcpy(sortedytrain, sortedytraind, y_train_size, cudaMemcpyDeviceToHost);
@@ -203,6 +232,8 @@ float *fit(float *X_train, float *y_train, float *X_test)
     
     free(distance);
     free(sortedDistance);
+
+    printf("\nkernel calcDistance: %.6f ms | kernel sortArray: %.6f ms\n", time1, time2);
     
     return sortedytrain;
 }
@@ -271,7 +302,7 @@ int main()
     int predicted_class = knn(X_train, y_train, X_random_test);
     
     
-    printf("Predicted label: %d True label: %d", predicted_class, (int)y_test[randId]);
+    printf("Predicted label: %d True label: %d\n", predicted_class, (int)y_test[randId]);
     
      
 	free(X_train);
