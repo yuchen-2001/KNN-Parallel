@@ -25,7 +25,7 @@ float *getFloatMat(int m, int n)
 }
 
 
-float *initFeatures(const char path[])
+float *initFeatures(char path[])
 {
 	int index = 0;
 	FILE *f  = NULL;
@@ -61,7 +61,7 @@ float getMax(float *x, int n)
 	return (float)maxIndex;
 }
 
-float *initLabels(const char path[])
+float *initLabels(char path[])
 {
 	int index = 0;
 	FILE *f  = NULL;
@@ -79,22 +79,23 @@ float *initLabels(const char path[])
 	return mat;
 }
 
-// Instead of calculate the distance between single test data point and all train data points,
-// directly calculate the whole batch of distances of test data points 
-__global__ void batchCalcDistance (float *X_train, float *X_test, float *distance)
-{
-    // Fully tiled
-    int train_id = blockIdx.x * blockDim.x + threadIdx.x;
-    int test_id  = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (train_id < NTRAIN && test_id < NTEST) 
+__global__ void calcDistance (float *X_train, float *X_test, float *distance)
+{
+    int blockid = blockIdx.x;
+    int threadid = blockDim.x*blockid + threadIdx.x;
+    
+    if (threadid < NTRAIN)
     {
-        float dist = 0;
-        for (int i = 0; i < NFEATURES; ++i) {
-            float diff = X_train[train_id * NFEATURES + i] - X_test[test_id * NFEATURES + i];
-            dist += diff * diff;
+        int i;
+        float dist = 0.0;
+    
+        for(i=0; i<NFEATURES; i++)
+        {
+            dist += (X_train[threadid*NFEATURES + i] - X_test[i])*(X_train[threadid*NFEATURES + i] - X_test[i]);
         }
-        distance[test_id * NTRAIN + train_id] = dist;
+    
+        distance[threadid] = dist;
     }
 }
 
@@ -165,13 +166,12 @@ float *fit(float *X_train, float *y_train, float *X_test)
     cudaEventCreate(&st2);
     cudaEventCreate(&et2);
     
-    // Should match the whole batch of distance between test data and train data
-    distance = getFloatMat(NTEST, NTRAIN);
+    distance = getFloatMat(NTRAIN, 1);
     
     int X_train_size = sizeof(float)*NFEATURES*NTRAIN;
     int y_train_size = sizeof(float)*NTRAIN;
-    int X_test_size = sizeof(float)*NFEATURES*NTEST;
-    int distance_size = sizeof(float)*NTEST*NTRAIN;
+    int X_test_size = sizeof(float)*NFEATURES;
+    int distance_size = sizeof(float)*NTRAIN;
     
     cudaMalloc((void**)&X_traind, X_train_size);
     cudaMalloc((void**)&y_traind, y_train_size);
@@ -186,8 +186,7 @@ float *fit(float *X_train, float *y_train, float *X_test)
     cudaEventRecord(st1);
    
     //TODO: launch distance kernel 
-    // Use batch distance calcultion
-    batchCalcDistance <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (X_traind, X_testd, distanced);   
+    calcDistance <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (X_traind, X_testd, distanced);   
     
     cudaDeviceSynchronize();
 
@@ -239,6 +238,19 @@ float *fit(float *X_train, float *y_train, float *X_test)
     return sortedytrain;
 }
 
+float *getRandomTestData(float *X_test, int *randId)
+{
+    srand ( time(NULL) );
+    *randId = rand()%NTEST;
+    float *data = getFloatMat(NFEATURES, 1);
+    
+    int i;
+    for(i=0; i<NFEATURES; i++)
+        data[i] = X_test[(*randId)*NFEATURES + i];
+    
+    return data;
+}
+
 void readData(float **X_train, float **y_train, float **X_test, float **y_test)
 {
     *X_train = initFeatures(X_TRAIN_PATH);
@@ -283,8 +295,11 @@ int main()
     //read data
     readData(&X_train, &y_train, &X_test, &y_test);
     
+    int randId;
+    float *X_random_test = getRandomTestData(X_test, &randId);
+    
     //call knn
-    int predicted_class = knn(X_train, y_train, X_test);
+    int predicted_class = knn(X_train, y_train, X_random_test);
     
     
     printf("Predicted label: %d True label: %d\n", predicted_class, (int)y_test[randId]);
