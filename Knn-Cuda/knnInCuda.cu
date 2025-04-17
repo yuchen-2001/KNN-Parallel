@@ -83,15 +83,34 @@ float *initLabels(const char path[])
 // directly calculate the whole batch of distances of test data points 
 __global__ void batchCalcDistance (float *X_train, float *X_test, float *distance)
 {
+    // shared by threads in x-direction
+    __shared__ float tile_train[BLOCK_X][NFEATURES];
+    // shared by threads in y-direction
+    __shared__ float tile_test[BLOCK_Y][NFEATURES];   
+
     // Fully tiled
     int train_id = blockIdx.x * blockDim.x + threadIdx.x;
     int test_id  = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (train_id < NTRAIN && test_id < NTEST) 
-    {
-        float dist = 0;
+    if (train_id < NTRAIN && threadIdx.y == 0) {
+        for (int i = 0; i < NFEATURES; i++) {
+            tile_train[threadIdx.x][i] = X_train[train_id * NFEATURES + i];
+        }
+    }
+    if (test_id < NTEST && threadIdx.x == 0) {
+        for (int i = 0; i < NFEATURES; i++) {
+            tile_test[threadIdx.y][i] = X_test[test_id * NFEATURES + i];
+        }
+    }
+
+    // Synchronize threads because of the use of shared memory
+    __syncthreads();
+
+    // Calculate distances
+    if (train_id < NTRAIN && test_id < NTEST) {
+        float dist = 0.0f;
         for (int i = 0; i < NFEATURES; ++i) {
-            float diff = X_train[train_id * NFEATURES + i] - X_test[test_id * NFEATURES + i];
+            float diff = tile_train[threadIdx.x][i] - tile_test[threadIdx.y][i];
             dist += diff * diff;
         }
         distance[test_id * NTRAIN + train_id] = dist;
@@ -185,9 +204,13 @@ float *fit(float *X_train, float *y_train, float *X_test)
     // Start record
     cudaEventRecord(st1);
    
+    dim3 block(BLOCK_X, BLOCK_Y);
+    dim3 grid((NTRAIN + BLOCK_X - 1) / BLOCK_X, (NTEST + BLOCK_Y - 1) / BLOCK_Y);
+
     //TODO: launch distance kernel 
     // Use batch distance calcultion
-    batchCalcDistance <<< NTRAIN/THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (X_traind, X_testd, distanced);   
+    // Use 2D launch
+    batchCalcDistance<<<grid, block>>>(X_traind, X_testd, distanced);
     
     cudaDeviceSynchronize();
 
@@ -287,7 +310,7 @@ int main()
     int predicted_class = knn(X_train, y_train, X_test);
     
     
-    printf("Predicted label: %d True label: %d\n", predicted_class, (int)y_test[randId]);
+    // printf("Predicted label: %d True label: %d\n", predicted_class, (int)y_test[randId]);
     
      
 	free(X_train);
