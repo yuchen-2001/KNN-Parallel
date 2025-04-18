@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-SOURCE_FILE="./knnInCuda_old.cu"
+SOURCE_FILE="./knnInCuda.cu"
 CONFIG_FILE="config.h"
+UTILS_FILE="./utils.cu"
 X_TRAIN_PATH="\"../datasets/small/X_train.csv\""
 Y_TRAIN_PATH="\"../datasets/small/y_train.csv\""
 X_TEST_PATH="\"../datasets/small/X_test.csv\""
@@ -29,7 +30,7 @@ for K in "${KERNELS[@]}"; do
     echo "[Testing with $K kernels]..."
     sed -i "s/^#define THREADS_PER_BLOCK .*/#define THREADS_PER_BLOCK $K/" "$CONFIG_FILE"
     OUTPUT="./outputs/small/knnInCuda_$K.out"
-    nvcc -o "$OUTPUT" "$SOURCE_FILE"
+    nvcc -o "$OUTPUT" "$SOURCE_FILE" "$UTILS_FILE"
 done
 
 echo

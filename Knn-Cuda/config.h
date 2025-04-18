@@ -1,5 +1,5 @@
-#define NTRAIN 10000
-#define NTEST 1000
+#define NTRAIN 50000
+#define NTEST 2000
 #define NFEATURES 4						// Number of features (columns) in th each training example
 #define NCLASSES 3						// Number of labels/ classes
 #define K 11							// Hyperparameter K in KNN
@@ -16,4 +16,4 @@
 
 
 // Array containing list of labels. Make changes 
-char classes[NCLASSES][25] = {"Iris-setosa", "Iris-versicolor", "Iris-virginica"};
+// char classes[NCLASSES][25] = {"Iris-setosa", "Iris-versicolor", "Iris-virginica"};

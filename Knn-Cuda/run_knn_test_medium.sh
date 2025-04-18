@@ -1,14 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-SOURCE_FILE="./knnInCuda_old.cu"
+SOURCE_FILE="./knnInCuda.cu"
 CONFIG_FILE="config.h"
+UTILS_FILE="./utils.cu"
 X_TRAIN_PATH="\"../datasets/medium/X_train.csv\""
 Y_TRAIN_PATH="\"../datasets/medium/y_train.csv\""
 X_TEST_PATH="\"../datasets/medium/X_test.csv\""
 Y_TEST_PATH="\"../datasets/medium/y_test.csv\""
-NTRAIN="1000"
-NTEST="100"
+NTRAIN="10000"
+NTEST="500"
 
 # List of kernel counts to test
 KERNELS=(1 2 4 8 16 32 64 128 256 512 1024)
@@ -30,7 +31,7 @@ for K in "${KERNELS[@]}"; do
     echo "[Testing with $K kernels]..."
     sed -i "s/^#define THREADS_PER_BLOCK .*/#define THREADS_PER_BLOCK $K/" "$CONFIG_FILE"
     OUTPUT="./outputs/medium/knnInCuda_$K.out"
-    nvcc -o "$OUTPUT" "$SOURCE_FILE"
+    nvcc -o "$OUTPUT" "$SOURCE_FILE" "$UTILS_FILE"
 done
 
 echo

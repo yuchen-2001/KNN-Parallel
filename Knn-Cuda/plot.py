@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 
+### BASELINE DATA ###
 # Data for 2 kernels
 small_calcDistance_time = [2.461664, 1.288704, 1.270944, 1.198080, 2.115584, 1.968416, 4.562752, 4.564128, 4.558752, 4.561984, 4.557344]
 
@@ -13,11 +14,23 @@ medium_sortArray_time = [0.065760, 0.117344, 0.064160, 0.056416, 0.033312, 0.033
 
 large_sortArray_time = [13.488224, 6.930464, 3.534848, 1.880064, 0.774432, 0.740928, 0.740288, 0.743456, 0.911360, 0.594048, 1.089792]
 
+# Total calculation time
 small_total_time = [5.216960, 5.270112, 4.909120, 5.264768, 5.124832, 6.326368, 5.522592, 5.004736, 4.750944, 4.958048, 4.768608]
 
-medium_total_time = [44.359135, 39.309696, 29.600321, 29.052320, 39.694847, 27.991167, 28.390079, 28.596031, 30.050560, 28.951391, 22.690176]
+medium_total_time = [2735.677490, 1480.564453, 915.711487, 613.092163, 429.029694, 346.325287, 363.448425, 350.728943, 423.357330, 390.299744, 523.808105]
 
-large_total_time = [5333.633301, 2970.058350, 1721.422241, 1125.911255, 800.460022, 656.855591, 675.420532, 695.952515, 763.381897, 765.337952, 1021.554138]
+large_total_time = [269571.312500, 136642.406250, 70499.570312, 37300.902344, 20990.832031, 11943.401367, 12525.944336, 12575.667969, 13425.613281, 13132.176758, 15961.399414]
+
+### OUR IMPLEMENTATION ###
+# Data for 2 kernels
+
+# Total calculation time
+small_total_time = []
+
+medium_total_time = []
+
+large_total_time = []
+
 
 if __name__ == '__main__':
     # set x
@@ -28,9 +41,9 @@ if __name__ == '__main__':
 
     # Plotting
     plt.figure(figsize=(12, 7))
-    plt.plot(x, small_total_time, marker='o', label='Small Dataset (135 rows)')
-    plt.plot(x, medium_total_time, marker='s', label='Medium Dataset (1000 rows)')
-    plt.plot(x, large_total_time, marker='^', label='Large Dataset (10,000 rows)')
+    plt.plot(x, small_total_time, marker='o', label='Small Dataset (135 train points, 15 test points)')
+    plt.plot(x, medium_total_time, marker='s', label='Medium Dataset (10,000 train points, 500 test points)')
+    plt.plot(x, large_total_time, marker='^', label='Large Dataset (50,000 train points, 2,000 test points)')
 
     plt.xlabel('Number of Kernels')
     plt.ylabel('Execution Time (ms)')
