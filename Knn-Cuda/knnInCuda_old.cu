@@ -25,7 +25,7 @@ float *getFloatMat(int m, int n)
 }
 
 
-float *initFeatures(char path[])
+float *initFeatures(const char path[])
 {
 	int index = 0;
 	FILE *f  = NULL;
@@ -61,7 +61,7 @@ float getMax(float *x, int n)
 	return (float)maxIndex;
 }
 
-float *initLabels(char path[])
+float *initLabels(const char path[])
 {
 	int index = 0;
 	FILE *f  = NULL;
@@ -139,8 +139,8 @@ int predict(float *labels)
 	
 	int predicted_class = (int)getMax(neighborCount, NCLASSES);
 
-	for(i=0; i<TOPN; i++)
-		printf(" %s: %f ", classes[i], probability[i]);
+	// for(i=0; i<TOPN; i++)
+	// 	printf(" %s: %f ", classes[i], probability[i]);
 
 	free(neighborCount);
 	free(probability);
@@ -233,20 +233,23 @@ float *fit(float *X_train, float *y_train, float *X_test)
     free(distance);
     free(sortedDistance);
 
-    printf("\nkernel calcDistance: %.6f ms | kernel sortArray: %.6f ms\n", time1, time2);
+    // printf("\nkernel calcDistance: %.6f ms | kernel sortArray: %.6f ms\n", time1, time2);
+
+    cudaEventDestroy(st1);
+    cudaEventDestroy(et1);
+    cudaEventDestroy(st2);
+    cudaEventDestroy(et2);
     
     return sortedytrain;
 }
 
-float *getRandomTestData(float *X_test, int *randId)
+float *getTestData(float *X_test, int *id)
 {
-    srand ( time(NULL) );
-    *randId = rand()%NTEST;
     float *data = getFloatMat(NFEATURES, 1);
     
     int i;
     for(i=0; i<NFEATURES; i++)
-        data[i] = X_test[(*randId)*NFEATURES + i];
+        data[i] = X_test[(*id)*NFEATURES + i];
     
     return data;
 }
@@ -263,22 +266,9 @@ void readData(float **X_train, float **y_train, float **X_test, float **y_test)
 int knn(float *X_train, float *y_train, float *X_test)
 {
     
-    printf(" Fitting model ");
-    
-    float et;
-    
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start); 
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
+    // printf(" Fitting model \n");
     
 	float *labels = fit(X_train, y_train, X_test);
-    
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&et, start, stop);
-   
-    printf("Time taken: %fms", et);
     
     int predicted_class = predict(labels);
     return predicted_class;
@@ -290,20 +280,33 @@ int main()
 	float *y_train;
 	float *X_test;
 	float *y_test;
+    float et;
  
     
     //read data
     readData(&X_train, &y_train, &X_test, &y_test);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start); 
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
     
-    int randId;
-    float *X_random_test = getRandomTestData(X_test, &randId);
-    
-    //call knn
-    int predicted_class = knn(X_train, y_train, X_random_test);
-    
-    
-    printf("Predicted label: %d True label: %d\n", predicted_class, (int)y_test[randId]);
-    
+    // Changed the random single test data point to the whole test data points
+    for (int id = 0; id < NTEST; id++) {
+        float *X_random_test = getTestData(X_test, &id);
+        //call knn
+        int predicted_class = knn(X_train, y_train, X_random_test);
+        free(X_random_test);
+    }
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&et, start, stop);
+   
+    printf("Time taken: %fms\n", et);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
      
 	free(X_train);
 	free(y_train);
