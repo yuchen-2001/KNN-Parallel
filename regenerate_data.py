@@ -3,12 +3,12 @@ import pandas as pd
 import os
 
 # Define dataset sizes
+# Define dataset sizes
 dataset_configs = [
     {"name": "small", "NTRAIN": 135, "NTEST": 15},
-    {"name": "medium", "NTRAIN": 1000, "NTEST": 100},
-    {"name": "large", "NTRAIN": 10000, "NTEST": 1000}
+    {"name": "medium", "NTRAIN": 10000, "NTEST": 500},
+    {"name": "large", "NTRAIN": 50000, "NTEST": 5000}
 ]
-
 # Shared settings
 NFEATURES = 4
 NCLASSES = 3
