@@ -12,8 +12,8 @@ NTRAIN="50000"
 NTEST="2000"
 
 # List of block shape to test
-BLOCK_X=(8 8 16 16 32)
-BLOCK_Y=(4 8 8 16 16)
+BLOCK_X=(8 4 8 16 8 16 32 16)
+BLOCK_Y=(4 8 8 8 16 16 16 32)
 
 echo "Running tests"
 echo "==============================="
