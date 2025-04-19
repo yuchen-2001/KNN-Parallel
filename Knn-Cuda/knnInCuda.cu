@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-
+#include <float.h>
 
 // cofig file, make changes here
 #include "config.h"
@@ -15,13 +15,25 @@
     }
 
 
+/*
+    ### Original version ###
+    This is a 1D kernel.
+    Only supports computing distances to one test point at a time.
+    Only use global memory, which is very slow.
 
-// Instead of calculate the distance between single test data point and all train data points,
-// this kernel is a tiled GPU implementation that optimizes distance computation between all test 
-// and training points using shared memory and 2D thread indexing.
+    ### Current version ###
+    This kernel is a tiled GPU implementation that optimizes distance computation between all test 
+    and training points using shared memory and 2D thread indexing.
+    Each thread computes the distance between one training and one test point.
+    Use shared memory to get high performance
+*/
 __global__ void batchCalcDistance (float *X_train, float *X_test, float *distance)
 {
-    // Tiling with Shared Memory
+    /*
+        Use shared memory to speed up repeated memory accesses
+        Epecifically reduce global memory reads. Global memory much slower than shared memory.
+    */
+
     // shared by threads in x-direction
     __shared__ float tile_train[BLOCK_X][NFEATURES];
     // shared by threads in y-direction
@@ -57,57 +69,173 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
     }
 }
 
-__global__ void sortArray2D(float *distance, float *ytrain, float *sortedDistance, float *sortedYtrain) {
-    int train_id = blockIdx.x * blockDim.x + threadIdx.x; // column
-    int test_id  = blockIdx.y * blockDim.y + threadIdx.y; // row
+/*
+    ### Original version ###
+    Sorts all NTRAIN distances for each test sample, which need O(N * log (N)) per test sample. 
+    This means we need O(NTEST * N * log(N)), very slow.
 
-    if (test_id >= NTEST || train_id >= NTRAIN) return;
+    ### Current version ###
+    Maintains a heap of K smallest distances
+    O(N * K) per test sample, which is O(NTEST * N * K)
+    Much faster when K < NTRAIN, especially for high NTRAIN. 
+    (Usually the number of training data will much higher than K)
+*/
+// Calculate the K minimum elements for every test point (i.e every row in the distance matrix)
+__global__ void findKMin(float *distances, int *minimum_indexes, int train_num_instances, int k)
+{
+    int train_instance = blockIdx.x * blockDim.x + threadIdx.x;
+    int test_instance = blockIdx.y;
+    extern __shared__ float sdata[];
+    int *heap_indexes = (int *)sdata;
+    float *heap_distances = (float *)&heap_indexes[blockDim.x * k];
+    float curr_distance;
+    int curr_index;
 
-    float element = distance[test_id * NTRAIN + train_id];
-    float label = ytrain[train_id];
-    int position = 0;
-
-    for (int j = 0; j < NTRAIN; ++j) {
-        float other = distance[test_id * NTRAIN + j];
-        if (other < element || (other == element && train_id < j)) {
-            position++;
+    if (train_instance < train_num_instances) {
+        for (int i = 0; i < k; i++) {
+            heap_indexes[i * blockDim.x + train_instance] = -1;
+            heap_distances[i * blockDim.x + train_instance] = FLT_MAX;
         }
     }
+    __syncthreads();
 
-    sortedDistance[test_id * NTRAIN + position] = element;
-    sortedYtrain[test_id * NTRAIN + position] = label;
+    /*
+        Iterate through the row of the distance matrix with a stride of blockDim.x (256)
+        This will ensure that at the end of the loop we have a list of K minimum elements for every element seen by the thread
+    */
+    for (int i = train_instance; i < train_num_instances; i += blockDim.x)
+    {
+        curr_distance = distances[test_instance * train_num_instances + i];
+        curr_index = i;
+        for (int j = k - 1; j >= 0; j--)
+        {
+            /*
+                Check if the current element is greater than the largest element in the heap of the thread
+                If yes, then rearrange the heap to accomodate the current element
+            */
+            if (heap_distances[(j * blockDim.x) + train_instance] >= curr_distance)
+            {
+                if (j == k - 1)
+                {
+                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
+                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
+                }
+                else
+                {
+                    for (int l = k - 1; l > j; l--)
+                    {
+                        heap_distances[(l * blockDim.x) + train_instance] = heap_distances[((l - 1) * blockDim.x) + train_instance];
+                        heap_indexes[(l * blockDim.x) + train_instance] = heap_indexes[((l - 1) * blockDim.x) + train_instance];
+                    }
+
+                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
+                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    /*
+        Every 32nd thread will find the minimum K elements by checking the minimum K elements calculated by the subsequent 32 threads
+        For the given blockDim.x size, this will give us 8 k-minimum values (256/32 = 8)
+    */
+    if (threadIdx.x % 16 == 0)
+    {
+        for (int i = threadIdx.x; i < threadIdx.x + 16; i++)
+        {
+            for (int j = k - 1; j >= 0; j--)
+            {
+                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i])
+                {
+                    if (j == k - 1)
+                    {
+                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
+                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
+                    }
+                    else
+                    {
+                        for (int l = k - 1; l > j; l--)
+                        {
+                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
+                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
+                        }
+
+                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
+                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
+                    }
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    /*
+        Have one thread find the global K-minimum values by scanning the 8 K-minimum values calculated above
+    */
+    if (threadIdx.x == 0)
+    {
+        for (int i = 0; i < blockDim.x / 16; i++)
+        {
+            for (int j = k - 1; j >= 0; j--)
+            {
+                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i * 16])
+                {
+                    if (j == k - 1)
+                    {
+                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
+                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
+                    }
+                    else
+                    {
+                        for (int l = k - 1; l > j; l--)
+                        {
+                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
+                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
+                        }
+
+                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
+                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < k; i++)
+        {
+            minimum_indexes[test_instance * k + i] = heap_indexes[i * blockDim.x + threadIdx.x];
+        }
+    }
 }
 
-int predict(float *labels)
+int predict(int *indexes, float *y_train)
 {
-	float* neighborCount = getFloatMat(NCLASSES, 1);
-    
-	float* probability = getFloatMat(NCLASSES, 1);
+    float* neighborCount = getFloatMat(NCLASSES, 1);
+    float* probability = getFloatMat(NCLASSES, 1);
 
-	int i;
-    for(i=0; i<NCLASSES; i++)
+    for (int i = 0; i < NCLASSES; i++)
         neighborCount[i] = 0;
 
-	for(i=0; i<K; i++)
-		neighborCount[(int)labels[i]]++;
+    for (int i = 0; i < K; i++) {
+        int train_idx = indexes[i];
+        int label = (int)y_train[train_idx];
+        neighborCount[label]++;
+    }
 
-	for(i=0; i<NCLASSES; i++)
-		probability[i] = neighborCount[i]*1.0/(float)K*1.0;
-	
-	int predicted_class = (int)getMax(neighborCount, NCLASSES);
+    for (int i = 0; i < NCLASSES; i++)
+        probability[i] = neighborCount[i] / (float)K;
 
-	// for(i=0; i<TOPN; i++)
-	// 	printf(" %s: %f ", classes[i], probability[i]);
+    int predicted_class = (int)getMax(neighborCount, NCLASSES);
 
-	free(neighborCount);
-	free(probability);
+    free(neighborCount);
+    free(probability);
 
-	return predicted_class;
+    return predicted_class;
 }
 
-float *fit(float *X_train, float *y_train, float *X_test,
+
+int *fit(float *X_train, float *y_train, float *X_test,
     float *X_traind, float *y_traind, float *X_testd,
-    float *distanced, float *sortedDistanced, float *sortedytraind)
+    float *distanced, int *min_indexes, int *min_indexesd)
 {
 
     // Create timer event
@@ -121,7 +249,6 @@ float *fit(float *X_train, float *y_train, float *X_test,
     
     // Should match the whole batch of distance between test data and train data
     float *distance = getFloatMat(NTEST, NTRAIN);
-    float *sortedytrain = getFloatMat(NTEST, NTRAIN);
 
     int X_train_size = sizeof(float)*NFEATURES*NTRAIN;
     int y_train_size = sizeof(float)*NTRAIN;
@@ -132,15 +259,27 @@ float *fit(float *X_train, float *y_train, float *X_test,
     cudaMemcpy(y_traind, y_train, y_train_size, cudaMemcpyHostToDevice);
     cudaMemcpy(X_testd, X_test, X_test_size, cudaMemcpyHostToDevice);
    
+    // Number of threads in each block. 2D: BLOCK_X * BLOCK_Y
     dim3 block(BLOCK_X, BLOCK_Y);
+
+    /*
+        Number of blocks in each grid 
+        Want to cover all NTRAIN * NTEST combinations using a 2D grid of blocks, where each block contains:
+        BLOCK_X threads along the x-axis & BLOCK_Y threads along the y-axis
+        Use (+ BLOCK_X - 1) is because we want to avoid missing data if NTRAIN isn't an exact multiple of BLOCK_X.
+    */
     dim3 grid((NTRAIN + BLOCK_X - 1) / BLOCK_X, (NTEST + BLOCK_Y - 1) / BLOCK_Y);
 
     // Start record
     cudaEventRecord(st1);
 
-    //TODO: launch distance kernel 
-    // Use batch distance calcultion
-    // Use 2D launch
+    
+
+    /*
+        Launch distance kernel 
+        Use batch distance calculation
+        Use 2D launch
+    */
     batchCalcDistance<<<grid, block>>>(X_traind, X_testd, distanced);
 
     // Check CUDA
@@ -156,12 +295,32 @@ float *fit(float *X_train, float *y_train, float *X_test,
     
     cudaMemcpy(distance, distanced, distance_size, cudaMemcpyDeviceToHost);
     cudaMemcpy(distanced, distance, distance_size, cudaMemcpyHostToDevice);
+
+    /*
+        Use one block per test point
+        We want 1 thread block to be responsible for finding the top-K distances in that row
+        This single block will collaborate via shared memory to process the entire row efficiently
+    */
+    dim3 gridFindKMin(1, NTEST);  
+
+
+    // threads per block
+    dim3 blockFindKMin(BLOCK_X * BLOCK_Y);
+    
+    /*
+        Setup dynamic shared memory
+        The kernel uses shared memory to store two arrays for each thread:
+        1. distances: Each thread store K float values
+        2. indexes: Each thread store K int values
+        So we need (BLOCK_X * BLOCK_Y) * K * sizeof(float) + (BLOCK_X * BLOCK_Y) * K * sizeof(int)
+    */
+    size_t smem_size = (BLOCK_X * BLOCK_Y) * K * sizeof(float) + (BLOCK_X * BLOCK_Y) * K * sizeof(int);
     
     // Start record
     cudaEventRecord(st2);
 
-    //TODO: call sorting kernel
-    sortArray2D <<< grid, block >>> (distanced, y_traind, sortedDistanced, sortedytraind);
+    // Call sorting kernel
+    findKMin<<<gridFindKMin, blockFindKMin, smem_size>>>(distanced, min_indexesd, NTRAIN, K);
 
     // Check CUDA
     CUDA_CHECK(cudaGetLastError());
@@ -172,15 +331,14 @@ float *fit(float *X_train, float *y_train, float *X_test,
     cudaEventSynchronize(et2);
     cudaEventElapsedTime(&time2, st2, et2);
     
-    // We do not need sortedDistance because we only need to use sortedDistance
-    // cudaMemcpy(sortedDistance, sortedDistanced, distance_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(sortedytrain, sortedytraind, y_train_size, cudaMemcpyDeviceToHost);
+    // min_indexes stores the indices into the training set for the K nearest neighbors
+    cudaMemcpy(min_indexes, min_indexesd, K * NTEST * sizeof(int), cudaMemcpyDeviceToHost);
     
     free(distance);
 
     // printf("\nkernel calcDistance: %.6f ms | kernel sortArray: %.6f ms\n", time1, time2);
     
-    return sortedytrain;
+    return min_indexes;
 }
 
 void readData(float **X_train, float **y_train, float **X_test, float **y_test)
@@ -194,14 +352,18 @@ void readData(float **X_train, float **y_train, float **X_test, float **y_test)
 
 int knn(float *X_train, float *y_train, float *X_test,
     float *X_traind, float *y_traind, float *X_testd,
-    float *distanced, float *sortedDistanced, float *sortedytraind)
+    float *distanced, int *min_indexes, int *min_indexesd)
 {
-    float *labels = fit(X_train, y_train, X_test,
-                        X_traind, y_traind, X_testd,
-                        distanced, sortedDistanced, sortedytraind);
 
-    int predicted_class = predict(labels);
-    free(labels);
+    /*
+        Directly return the indexes of predictions
+    */
+    int *indexes = fit(X_train, y_train, X_test,
+                        X_traind, y_traind, X_testd,
+                        distanced, min_indexes, min_indexesd);
+
+    int predicted_class = predict(indexes, y_train);
+    free(indexes);
     return predicted_class;
 }
 
@@ -209,15 +371,16 @@ int main()
 {
     float *X_train, *y_train, *X_test, *y_test, et;
     float *X_traind, *y_traind, *X_testd, *distanced;
-    float *sortedDistanced, *sortedytraind;
-    
+    int *min_indexes, *min_indexesd;
+
+    min_indexes = (int *)calloc(NTEST * K, sizeof(int));
+
     // Move all memory allocation operations outside of the knn fit function
     cudaMalloc((void**)&X_traind, sizeof(float)*NFEATURES*NTRAIN);
     cudaMalloc((void**)&y_traind, sizeof(float)*NTRAIN);
     cudaMalloc((void**)&X_testd, sizeof(float)*NFEATURES*NTEST);
     cudaMalloc((void**)&distanced, sizeof(float)*NTRAIN*NTEST);
-    cudaMalloc((void**)&sortedDistanced, sizeof(float)*NTRAIN*NTEST);
-    cudaMalloc((void**)&sortedytraind, sizeof(float)*NTRAIN*NTEST);
+    cudaMalloc((void**)&min_indexesd, sizeof(int) * NTEST * K);
     
     cudaEvent_t start, stop;
     cudaEventCreate(&start); 
@@ -231,7 +394,7 @@ int main()
     //call knn
     int predicted_class = knn(X_train, y_train, X_test,
         X_traind, y_traind, X_testd,
-        distanced, sortedDistanced, sortedytraind);
+        distanced, min_indexes, min_indexesd);
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -246,8 +409,7 @@ int main()
     cudaFree(y_traind);
     cudaFree(X_testd);
     cudaFree(distanced);
-    cudaFree(sortedDistanced);
-    cudaFree(sortedytraind);
+    cudaFree(min_indexesd);
      
 	free(X_train);
 	free(y_train);
