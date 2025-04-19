@@ -12,7 +12,7 @@ NTRAIN="10000"
 NTEST="500"
 
 # List of kernel counts to test
-KERNELS=(1 2 4 8 16 32 64 128 256 512 1024)
+KERNELS=(32 64 128 256 512)
 
 echo "Running tests"
 echo "==============================="
@@ -30,7 +30,7 @@ for K in "${KERNELS[@]}"; do
     echo
     echo "[Testing with $K kernels]..."
     sed -i "s/^#define THREADS_PER_BLOCK .*/#define THREADS_PER_BLOCK $K/" "$CONFIG_FILE"
-    OUTPUT="./outputs/medium/knnInCuda_$K.out"
+    OUTPUT="../outputs/medium/knnInCuda_$K.out"
     nvcc -o "$OUTPUT" "$SOURCE_FILE" "$UTILS_FILE"
 done
 

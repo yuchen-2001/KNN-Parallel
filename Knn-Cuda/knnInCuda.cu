@@ -79,90 +79,83 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
     O(N * K) per test sample, which is O(NTEST * N * K)
     Much faster when K < NTRAIN, especially for high NTRAIN. 
     (Usually the number of training data will much higher than K)
+
+    Caution: This function only support >= 32 threads and < 1024 threads to run
+    So we test 32 to 512 threads per block
 */
-// Calculate the K minimum elements for every test point (i.e every row in the distance matrix)
-__global__ void findKMin(float *distances, int *minimum_indexes, int train_num_instances, int k)
+__global__ void findKMin(float *distances, int *min_indexes)
 {
-    int train_instance = blockIdx.x * blockDim.x + threadIdx.x;
-    int test_instance = blockIdx.y;
-    extern __shared__ float sdata[];
-    int *heap_indexes = (int *)sdata;
-    float *heap_distances = (float *)&heap_indexes[blockDim.x * k];
-    float curr_distance;
-    int curr_index;
+    extern __shared__ float shared_mem[];
 
-    if (train_instance < train_num_instances) {
-        for (int i = 0; i < k; i++) {
-            heap_indexes[i * blockDim.x + train_instance] = -1;
-            heap_distances[i * blockDim.x + train_instance] = FLT_MAX;
+    // Layout: First part for indexes, second for distances
+    int *shared_indexes = (int *)shared_mem;
+    float *shared_distances = (float *)&shared_indexes[blockDim.x * K];
+
+    int thread_id = threadIdx.x;
+    int train_idx = blockIdx.x * blockDim.x + thread_id;
+    int test_idx  = blockIdx.y;
+
+    // Initialize K elements per thread in shared memory
+    if (train_idx < NTRAIN) {
+        for (int k = 0; k < K; ++k) {
+            shared_indexes[k * blockDim.x + thread_id] = -1;
+            shared_distances[k * blockDim.x + thread_id] = FLT_MAX;
         }
     }
     __syncthreads();
 
-    /*
-        Iterate through the row of the distance matrix with a stride of blockDim.x (256)
-        This will ensure that at the end of the loop we have a list of K minimum elements for every element seen by the thread
-    */
-    for (int i = train_instance; i < train_num_instances; i += blockDim.x)
-    {
-        curr_distance = distances[test_instance * train_num_instances + i];
-        curr_index = i;
-        for (int j = k - 1; j >= 0; j--)
-        {
-            /*
-                Check if the current element is greater than the largest element in the heap of the thread
-                If yes, then rearrange the heap to accomodate the current element
-            */
-            if (heap_distances[(j * blockDim.x) + train_instance] >= curr_distance)
-            {
-                if (j == k - 1)
-                {
-                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
-                }
-                else
-                {
-                    for (int l = k - 1; l > j; l--)
-                    {
-                        heap_distances[(l * blockDim.x) + train_instance] = heap_distances[((l - 1) * blockDim.x) + train_instance];
-                        heap_indexes[(l * blockDim.x) + train_instance] = heap_indexes[((l - 1) * blockDim.x) + train_instance];
-                    }
+    // Sweep through row for current test instance in strides of blockDim.x
+    for (int i = train_idx; i < NTRAIN; i += blockDim.x) {
+        float dist = distances[test_idx * NTRAIN + i];
+        int index = i;
 
-                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
+        for (int k = K - 1; k >= 0; --k) {
+            float *slot = &shared_distances[k * blockDim.x + thread_id];
+            int *slot_idx = &shared_indexes[k * blockDim.x + thread_id];
+
+            if (*slot >= dist) {
+                if (k == K - 1) {
+                    *slot = dist;
+                    *slot_idx = index;
+                } else {
+                    for (int shift = K - 1; shift > k; --shift) {
+                        shared_distances[shift * blockDim.x + thread_id] =
+                            shared_distances[(shift - 1) * blockDim.x + thread_id];
+                        shared_indexes[shift * blockDim.x + thread_id] =
+                            shared_indexes[(shift - 1) * blockDim.x + thread_id];
+                    }
+                    *slot = dist;
+                    *slot_idx = index;
                 }
+                break;
             }
         }
     }
     __syncthreads();
 
-    /*
-        Every 32nd thread will find the minimum K elements by checking the minimum K elements calculated by the subsequent 32 threads
-        For the given blockDim.x size, this will give us 8 k-minimum values (256/32 = 8)
-    */
-    if (threadIdx.x % 16 == 0)
-    {
-        for (int i = threadIdx.x; i < threadIdx.x + 16; i++)
-        {
-            for (int j = k - 1; j >= 0; j--)
-            {
-                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i])
-                {
-                    if (j == k - 1)
-                    {
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
-                    }
-                    else
-                    {
-                        for (int l = k - 1; l > j; l--)
-                        {
-                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
-                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
+    // Reduce within warp-groups of 16
+    if (thread_id % 16 == 0) {
+        for (int i = thread_id; i < thread_id + 16; ++i) {
+            for (int k = K - 1; k >= 0; --k) {
+                float val = shared_distances[k * blockDim.x + i];
+                int idx = shared_indexes[k * blockDim.x + i];
+
+                float *slot = &shared_distances[k * blockDim.x + thread_id];
+                int *slot_idx = &shared_indexes[k * blockDim.x + thread_id];
+
+                if (*slot >= val) {
+                    if (k == K - 1) {
+                        *slot = val;
+                        *slot_idx = idx;
+                    } else {
+                        for (int shift = K - 1; shift > k; --shift) {
+                            shared_distances[shift * blockDim.x + thread_id] =
+                                shared_distances[(shift - 1) * blockDim.x + thread_id];
+                            shared_indexes[shift * blockDim.x + thread_id] =
+                                shared_indexes[(shift - 1) * blockDim.x + thread_id];
                         }
-
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
+                        *slot = val;
+                        *slot_idx = idx;
                     }
                 }
             }
@@ -170,39 +163,39 @@ __global__ void findKMin(float *distances, int *minimum_indexes, int train_num_i
     }
     __syncthreads();
 
-    /*
-        Have one thread find the global K-minimum values by scanning the 8 K-minimum values calculated above
-    */
-    if (threadIdx.x == 0)
-    {
-        for (int i = 0; i < blockDim.x / 16; i++)
-        {
-            for (int j = k - 1; j >= 0; j--)
-            {
-                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i * 16])
-                {
-                    if (j == k - 1)
-                    {
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
-                    }
-                    else
-                    {
-                        for (int l = k - 1; l > j; l--)
-                        {
-                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
-                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
-                        }
+    // Final reduction: thread 0 picks best across warp-group leaders
+    if (thread_id == 0) {
+        for (int i = 0; i < blockDim.x / 16; ++i) {
+            int leader = i * 16;
 
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
+            for (int k = K - 1; k >= 0; --k) {
+                float val = shared_distances[k * blockDim.x + leader];
+                int idx = shared_indexes[k * blockDim.x + leader];
+
+                float *slot = &shared_distances[k * blockDim.x];
+                int *slot_idx = &shared_indexes[k * blockDim.x];
+
+                if (*slot >= val) {
+                    if (k == K - 1) {
+                        *slot = val;
+                        *slot_idx = idx;
+                    } else {
+                        for (int shift = K - 1; shift > k; --shift) {
+                            shared_distances[shift * blockDim.x] =
+                                shared_distances[(shift - 1) * blockDim.x];
+                            shared_indexes[shift * blockDim.x] =
+                                shared_indexes[(shift - 1) * blockDim.x];
+                        }
+                        *slot = val;
+                        *slot_idx = idx;
                     }
                 }
             }
         }
-        for (int i = 0; i < k; i++)
-        {
-            minimum_indexes[test_instance * k + i] = heap_indexes[i * blockDim.x + threadIdx.x];
+
+        // Write final top-K indexes to output
+        for (int k = 0; k < K; ++k) {
+            min_indexes[test_idx * K + k] = shared_indexes[k * blockDim.x];
         }
     }
 }
@@ -217,6 +210,10 @@ int predict(int *indexes, float *y_train)
 
     for (int i = 0; i < K; i++) {
         int train_idx = indexes[i];
+        if (train_idx < 0 || train_idx >= NTRAIN) {
+            printf("Invalid index: %d (i=%d)\n", train_idx, i);
+            exit(1);
+        }
         int label = (int)y_train[train_idx];
         neighborCount[label]++;
     }
@@ -314,13 +311,14 @@ int *fit(float *X_train, float *y_train, float *X_test,
         2. indexes: Each thread store K int values
         So we need (BLOCK_X * BLOCK_Y) * K * sizeof(float) + (BLOCK_X * BLOCK_Y) * K * sizeof(int)
     */
-    size_t smem_size = (BLOCK_X * BLOCK_Y) * K * sizeof(float) + (BLOCK_X * BLOCK_Y) * K * sizeof(int);
+    size_t shared_mem_size = (BLOCK_X * BLOCK_Y) * K * sizeof(float) + (BLOCK_X * BLOCK_Y) * K * sizeof(int);
+
     
     // Start record
     cudaEventRecord(st2);
 
     // Call sorting kernel
-    findKMin<<<gridFindKMin, blockFindKMin, smem_size>>>(distanced, min_indexesd, NTRAIN, K);
+    findKMin<<<gridFindKMin, blockFindKMin, shared_mem_size>>>(distanced, min_indexesd);
 
     // Check CUDA
     CUDA_CHECK(cudaGetLastError());
@@ -336,7 +334,7 @@ int *fit(float *X_train, float *y_train, float *X_test,
     
     free(distance);
 
-    // printf("\nkernel calcDistance: %.6f ms | kernel sortArray: %.6f ms\n", time1, time2);
+    printf("\nkernel batchCalcDistance: %.6f ms | kernel findKMin: %.6f ms\n", time1, time2);
     
     return min_indexes;
 }
