@@ -4,10 +4,10 @@ set -euo pipefail
 SOURCE_FILE="../knnInCuda.cu"
 CONFIG_FILE="../config.h"
 UTILS_FILE="../utils.cu"
-X_TRAIN_PATH="\"../../datasets/large/X_train.csv\""
-Y_TRAIN_PATH="\"../../datasets/large/y_train.csv\""
-X_TEST_PATH="\"../../datasets/large/X_test.csv\""
-Y_TEST_PATH="\"../../datasets/large/y_test.csv\""
+X_TRAIN_PATH="\"../../datasets/medium/X_train.csv\""
+Y_TRAIN_PATH="\"../../datasets/medium/y_train.csv\""
+X_TEST_PATH="\"../../datasets/medium/X_test.csv\""
+Y_TEST_PATH="\"../../datasets/medium/y_test.csv\""
 NTRAIN="10000"
 NTEST="500"
 
@@ -37,9 +37,8 @@ for ((i = 0; i < ${#BLOCK_X[@]}; i++)); do
     sed -i "s/^#define BLOCK_X .*/#define BLOCK_X $bx/" "$CONFIG_FILE"
     sed -i "s/^#define BLOCK_Y .*/#define BLOCK_Y $by/" "$CONFIG_FILE"
 
-    OUTPUT="../outputs/large/knnInCuda_${bx}x${by}.out"
+    OUTPUT="../outputs/medium/knnInCuda_${bx}x${by}.out"
     nvcc -o "$OUTPUT" "$SOURCE_FILE" "$UTILS_FILE"
-    "$OUTPUT"
 done
 
 echo
