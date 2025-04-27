@@ -16,6 +16,8 @@
     2.  `cd small` / `cd medium` / `cd large`
 > [!important]
 > You must ensure you enter the small/medium/large folder. Otherwise, there will be path errors.
-2.** Run .out files**: `./knnInCuda_xxx.out`
+
+2. **Run .out files**: `./knnInCuda_xxx.out`
+
 > [!NOTE]
 > `xxx` should be replaced to the shape of block. Use `ls` to check the avaliable shapes in each folders.
