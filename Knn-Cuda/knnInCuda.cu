@@ -40,18 +40,18 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
     __shared__ float tile_test[BLOCK_Y][NFEATURES];   
 
     // Fully tiled
-    int train_id = blockIdx.x * blockDim.x + threadIdx.x;
-    int test_id  = blockIdx.y * blockDim.y + threadIdx.y;
+    int trainIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int testIdx  = blockIdx.y * blockDim.y + threadIdx.y;
 
     // Avoiding redundant loads
-    if (train_id < NTRAIN && threadIdx.y == 0) {
+    if (trainIdx < NTRAIN && threadIdx.y == 0) {
         for (int i = 0; i < NFEATURES; i++) {
-            tile_train[threadIdx.x][i] = X_train[train_id * NFEATURES + i];
+            tile_train[threadIdx.x][i] = X_train[trainIdx * NFEATURES + i];
         }
     }
-    if (test_id < NTEST && threadIdx.x == 0) {
+    if (testIdx < NTEST && threadIdx.x == 0) {
         for (int i = 0; i < NFEATURES; i++) {
-            tile_test[threadIdx.y][i] = X_test[test_id * NFEATURES + i];
+            tile_test[threadIdx.y][i] = X_test[testIdx * NFEATURES + i];
         }
     }
 
@@ -59,13 +59,13 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
     __syncthreads();
 
     // Calculate distances
-    if (train_id < NTRAIN && test_id < NTEST) {
+    if (trainIdx < NTRAIN && testIdx < NTEST) {
         float dist = 0.0f;
         for (int i = 0; i < NFEATURES; ++i) {
             float diff = tile_train[threadIdx.x][i] - tile_test[threadIdx.y][i];
             dist += diff * diff;
         }
-        distance[test_id * NTRAIN + train_id] = dist;
+        distance[testIdx * NTRAIN + trainIdx] = dist;
     }
 }
 
@@ -83,104 +83,132 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
     Caution: This function only support >= 32 threads and < 1024 threads to run
     So we test 32 to 512 threads per block
 */
-__global__ void findKMin(float *distances, int *min_indexes)
-{
-    int train_id = blockIdx.x * blockDim.x + threadIdx.x;
-    int test_id = blockIdx.y;
+__global__ void findKMin(float *distances, int *min_indexes) {
+    // Compute global thread index for training points
+    int trainIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Which test instance this block handles
+    int testIdx = blockIdx.y;
 
     // Dynamic shared memory
     extern __shared__ float sdata[];
-    
-    int *heap_indexes = (int *)sdata;
-    float *heap_distances = (float *)&heap_indexes[blockDim.x * K];
 
-    float curr_distance;
-    int curr_index;
+    // First part of shared memory holds indexes, second part holds distances
+    int *sharedIndexes = (int*) sdata;
+    float *sharedDistances = (float*) (sharedIndexes + (K * blockDim.x));
 
-    // Initialize each thread for size K
-    if (train_id < NTRAIN) {
-        for (int i = 0; i < K; i++) {
-            heap_indexes[i * blockDim.x + train_id] = -1;
-            heap_distances[i * blockDim.x + train_id] = FLT_MAX;
+    // Each thread initializes its own top-K buffer in shared memory
+    if (trainIdx < NTRAIN) {
+        for (int k = 0; k < K; k++) {
+            int pos = k * blockDim.x + threadIdx.x;
+            sharedIndexes[pos] = -1;
+            sharedDistances[pos] = FLT_MAX;
         }
     }
 
-    // wait for all threads
+    // Make sure all threads have finished initialization
     __syncthreads();
 
-    // Each thread scans its strided portion of the distance row (so threads cover the entire row in "blockDim.x" strides)
-    for (int i = train_id; i < NTRAIN; i += blockDim.x) {
-        curr_distance = distances[test_id * NTRAIN + i];
-        curr_index = i;
+    // Each thread scans through the distances for the certain test instance
+    // in strides of blockDim.x, covering all training points
+    for (int i = trainIdx; i < NTRAIN; i += blockDim.x) {
+        float d = distances[testIdx * NTRAIN + i];
+        int idx = i;
 
-        // Try inserting this (distance,index) into our local sorted K-array (from largest to smallest)
+        // Insert (d, idx) into the local sorted K-list (largest to smallest)
         for (int j = K - 1; j >= 0; j--) {
-            if (heap_distances[(j * blockDim.x) + train_id] >= curr_distance) {
+            int pos = j * blockDim.x + threadIdx.x;
+            if (sharedDistances[pos] >= d) {
+                // If currently at end of list, just replace
                 if (j == K - 1) {
-                    heap_distances[(j * blockDim.x) + train_id] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_id] = curr_index;
+                    sharedDistances[pos] = d;
+                    sharedIndexes[pos] = idx;
                 } else {
+                    // Shift bigger entries down by one
                     for (int l = K - 1; l > j; l--) {
-                        heap_distances[(l * blockDim.x) + train_id] = heap_distances[((l - 1) * blockDim.x) + train_id];
-                        heap_indexes[(l * blockDim.x) + train_id] = heap_indexes[((l - 1) * blockDim.x) + train_id];
+                        int to = l * blockDim.x + threadIdx.x;
+                        int from = (l - 1) * blockDim.x + threadIdx.x;
+                        sharedDistances[to] = sharedDistances[from];
+                        sharedIndexes[to] = sharedIndexes[from];
                     }
-
-                    heap_distances[(j * blockDim.x) + train_id] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_id] = curr_index;
+                    // Insert new entry
+                    sharedDistances[pos] = d;
+                    sharedIndexes[pos] = idx;
                 }
             }
         }
     }
+
+    // Wait for all threads to finish insertion
     __syncthreads();
 
-    // Every 16th thread "leader" merges K-heaps from its 16-thread subgroup
+    // Merge heaps in groups of 16 threads: threadIdx.x % 16 == 0 is a subgroup leader
     if (threadIdx.x % 16 == 0) {
-        for (int i = threadIdx.x; i < threadIdx.x + 16; i++) {
-            // merge into threadIdx.x's heap
+        for (int t = 0; t < 16; t++) {
+            int other = threadIdx.x + t;
             for (int j = K - 1; j >= 0; j--) {
-                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i]) {
+                // Compute the shared-memory positions
+                int leaderPos = j * blockDim.x + threadIdx.x;
+                int otherPos = j * blockDim.x + other;
+                if (sharedDistances[leaderPos] >= sharedDistances[otherPos]) {
+                    // If at the end of the list, overwrite
                     if (j == K - 1) {
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
+                        sharedDistances[leaderPos] = sharedDistances[otherPos];
+                        sharedIndexes[leaderPos] = sharedIndexes[otherPos];
                     } else {
                         for (int l = K - 1; l > j; l--) {
-                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
-                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
+                            int to = l * blockDim.x + threadIdx.x;
+                            int from = (l - 1) * blockDim.x + threadIdx.x;
+                            sharedDistances[to] = sharedDistances[from];
+                            sharedIndexes[to] = sharedIndexes[from];
                         }
 
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i];
+                        // Insert the new smaller distance at position j
+                        sharedDistances[leaderPos] = sharedDistances[otherPos];
+                        sharedIndexes[leaderPos] = sharedIndexes[otherPos];
                     }
                 }
             }
         }
     }
+
+    // Wait again before final merge
     __syncthreads();
 
-    // Thread 0 merges the subgroup leaders into the final top-K
+    // Final merge by thread 0: combine all subgroup leaders into final top-K
     if (threadIdx.x == 0) {
-        for (int i = 0; i < blockDim.x / 16; i++) {
+        int numLeaders = blockDim.x / 16;
+        // Iterate over each subgroup leader
+        for (int g = 0; g < numLeaders; g++) {
+            // index of that leader
+            int other = g * 16;
             for (int j = K - 1; j >= 0; j--) {
-                if (heap_distances[(j * blockDim.x) + threadIdx.x] >= heap_distances[(j * blockDim.x) + i * 16]) {
-                    if (j == K - 1) {
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
-                    } else {
-                        for (int l = K - 1; l > j; l--) {
-                            heap_distances[(l * blockDim.x) + threadIdx.x] = heap_distances[((l - 1) * blockDim.x) + threadIdx.x];
-                            heap_indexes[(l * blockDim.x) + threadIdx.x] = heap_indexes[((l - 1) * blockDim.x) + threadIdx.x];
-                        }
+                // j-th slot of thread 0
+                int mainPos = j * blockDim.x;
 
-                        heap_distances[(j * blockDim.x) + threadIdx.x] = heap_distances[(j * blockDim.x) + i * 16];
-                        heap_indexes[(j * blockDim.x) + threadIdx.x] = heap_indexes[(j * blockDim.x) + i * 16];
+                // j-th slot of the other leader
+                int otherPos = j * blockDim.x + other;
+
+                if (sharedDistances[mainPos] >= sharedDistances[otherPos]) {
+                    if (j == K - 1) {
+                        // Overwrite
+                        sharedDistances[mainPos] = sharedDistances[otherPos];
+                        sharedIndexes[mainPos] = sharedIndexes[otherPos];
+                    } else {
+                        // Insert at position j
+                        for (int l = K - 1; l > j; l--) {
+                            sharedDistances[l * blockDim.x] = sharedDistances[(l - 1) * blockDim.x];
+                            sharedIndexes[l * blockDim.x] = sharedIndexes[(l - 1) * blockDim.x];
+                        }
+                        sharedDistances[mainPos] = sharedDistances[otherPos];
+                        sharedIndexes[mainPos] = sharedIndexes[otherPos];
                     }
                 }
             }
         }
 
-        // store final top-K indices to global memory
-        for (int i = 0; i < K; i++) {
-            min_indexes[test_id * K + i] = heap_indexes[i * blockDim.x + threadIdx.x];
+        // Write the final K nearest neighbor indices back to global memory
+        for (int k = 0; k < K; k++) {
+            min_indexes[testIdx * K + k] = sharedIndexes[k * blockDim.x];
         }
     }
 }
