@@ -85,19 +85,23 @@ __global__ void batchCalcDistance (float *X_train, float *X_test, float *distanc
 */
 __global__ void findKMin(float *distances, int *min_indexes)
 {
-    int train_instance = blockIdx.x * blockDim.x + threadIdx.x;
-    int test_instance = blockIdx.y;
+    int train_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int test_id = blockIdx.y;
+
+    // Dynamic shared memory
     extern __shared__ float sdata[];
+    
     int *heap_indexes = (int *)sdata;
     float *heap_distances = (float *)&heap_indexes[blockDim.x * K];
+
     float curr_distance;
     int curr_index;
 
     // Initialize each thread for size K
-    if (train_instance < NTRAIN) {
+    if (train_id < NTRAIN) {
         for (int i = 0; i < K; i++) {
-            heap_indexes[i * blockDim.x + train_instance] = -1;
-            heap_distances[i * blockDim.x + train_instance] = FLT_MAX;
+            heap_indexes[i * blockDim.x + train_id] = -1;
+            heap_distances[i * blockDim.x + train_id] = FLT_MAX;
         }
     }
 
@@ -105,24 +109,24 @@ __global__ void findKMin(float *distances, int *min_indexes)
     __syncthreads();
 
     // Each thread scans its strided portion of the distance row (so threads cover the entire row in "blockDim.x" strides)
-    for (int i = train_instance; i < NTRAIN; i += blockDim.x) {
-        curr_distance = distances[test_instance * NTRAIN + i];
+    for (int i = train_id; i < NTRAIN; i += blockDim.x) {
+        curr_distance = distances[test_id * NTRAIN + i];
         curr_index = i;
 
-        // Try inserting this (distance,index) into our local sorted K-array (from largest→smallest)
+        // Try inserting this (distance,index) into our local sorted K-array (from largest to smallest)
         for (int j = K - 1; j >= 0; j--) {
-            if (heap_distances[(j * blockDim.x) + train_instance] >= curr_distance) {
+            if (heap_distances[(j * blockDim.x) + train_id] >= curr_distance) {
                 if (j == K - 1) {
-                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
+                    heap_distances[(j * blockDim.x) + train_id] = curr_distance;
+                    heap_indexes[(j * blockDim.x) + train_id] = curr_index;
                 } else {
                     for (int l = K - 1; l > j; l--) {
-                        heap_distances[(l * blockDim.x) + train_instance] = heap_distances[((l - 1) * blockDim.x) + train_instance];
-                        heap_indexes[(l * blockDim.x) + train_instance] = heap_indexes[((l - 1) * blockDim.x) + train_instance];
+                        heap_distances[(l * blockDim.x) + train_id] = heap_distances[((l - 1) * blockDim.x) + train_id];
+                        heap_indexes[(l * blockDim.x) + train_id] = heap_indexes[((l - 1) * blockDim.x) + train_id];
                     }
 
-                    heap_distances[(j * blockDim.x) + train_instance] = curr_distance;
-                    heap_indexes[(j * blockDim.x) + train_instance] = curr_index;
+                    heap_distances[(j * blockDim.x) + train_id] = curr_distance;
+                    heap_indexes[(j * blockDim.x) + train_id] = curr_index;
                 }
             }
         }
@@ -176,7 +180,7 @@ __global__ void findKMin(float *distances, int *min_indexes)
 
         // store final top-K indices to global memory
         for (int i = 0; i < K; i++) {
-            min_indexes[test_instance * K + i] = heap_indexes[i * blockDim.x + threadIdx.x];
+            min_indexes[test_id * K + i] = heap_indexes[i * blockDim.x + threadIdx.x];
         }
     }
 }
